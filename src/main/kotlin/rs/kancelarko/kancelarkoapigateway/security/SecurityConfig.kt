@@ -1,5 +1,6 @@
 package rs.kancelarko.kancelarkoapigateway.security
 
+import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
@@ -32,20 +33,23 @@ import org.springframework.security.oauth2.jwt.JwtTypeValidator
 import org.springframework.security.oauth2.jwt.NimbusReactiveJwtDecoder
 import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder
 import org.springframework.security.oauth2.server.resource.web.server.BearerTokenServerAuthenticationEntryPoint
+import org.springframework.security.web.server.DefaultServerRedirectStrategy
 import org.springframework.security.web.server.DelegatingServerAuthenticationEntryPoint
 import org.springframework.security.web.server.DelegatingServerAuthenticationEntryPoint.DelegateEntry
 import org.springframework.security.web.server.SecurityWebFilterChain
 import org.springframework.security.web.server.ServerAuthenticationEntryPoint
-import org.springframework.security.web.server.authentication.RedirectServerAuthenticationEntryPoint
-import org.springframework.security.web.server.authentication.RedirectServerAuthenticationSuccessHandler
+import org.springframework.security.web.server.authentication.ServerAuthenticationSuccessHandler
 import org.springframework.security.web.server.authentication.ServerAuthenticationFailureHandler
+import org.springframework.security.web.server.savedrequest.NoOpServerRequestCache
 import org.springframework.security.web.server.util.matcher.AndServerWebExchangeMatcher
 import org.springframework.security.web.server.util.matcher.MediaTypeServerWebExchangeMatcher
 import org.springframework.security.web.server.util.matcher.NegatedServerWebExchangeMatcher
-import org.springframework.security.web.server.util.matcher.OrServerWebExchangeMatcher
 import org.springframework.security.web.server.util.matcher.PathPatternParserServerWebExchangeMatcher
 import org.springframework.security.web.server.util.matcher.ServerWebExchangeMatcher
 import org.springframework.security.web.server.util.matcher.ServerWebExchangeMatcher.MatchResult
+import org.springframework.web.util.UriComponentsBuilder
+import rs.kancelarko.kancelarkoapigateway.gateway.RejectReason
+import rs.kancelarko.kancelarkoapigateway.gateway.reject
 import java.net.URI
 
 /**
@@ -75,8 +79,11 @@ class SecurityConfig(
         oidcSessionRegistry: ReactiveOidcSessionRegistry,
         @Value("\${server.port}") port: Int,
         @Value("\${server.reactive.session.cookie.name:SESSION}") sessionCookieName: String,
+        appUrls: AppUrls,
+        marker: SessionMarker,
+        loginRequests: LoginRequests,
     ): SecurityWebFilterChain {
-        val requestCache = AbsoluteUrlRequestCache(gateway)
+        val redirects = DefaultServerRedirectStrategy()
 
         return http {
             authorizeExchange {
@@ -85,19 +92,27 @@ class SecurityConfig(
                 authorize("/bff/session", permitAll)
                 authorize(GatewayLogoutSuccessHandler.LOGGED_OUT_PATH, permitAll)
                 authorize("/account", permitAll)
+                authorize("/bff/sdk.js", permitAll)
+                authorize("/bff/popup-done", permitAll)
+                authorize(PathPatternParserServerWebExchangeMatcher(LOGOUT_PATH, HttpMethod.GET), permitAll)
                 authorize(anyExchange, authenticated)
             }
+            // Adresa za povratak ne čeka u sesiji, putuje uz prijavu (`returnTo`, LoginRequests).
             requestCache {
-                this.requestCache = requestCache
+                requestCache = NoOpServerRequestCache.getInstance()
             }
             oauth2Login {
+                // Započete prijave po `state` u Redis-u, ne u sesiji: više tabova i popup prijavljuju se u isto vreme.
+                authorizationRequestRepository = loginRequests
                 authorizationRequestResolver = DefaultServerOAuth2AuthorizationRequestResolver(
                     clientRegistrations,
                     PathPatternParserServerWebExchangeMatcher(AUTHORIZATION_PATH),
                 )
                 authenticationMatcher = PathPatternParserServerWebExchangeMatcher(CALLBACK_PATH)
-                authenticationSuccessHandler = RedirectServerAuthenticationSuccessHandler(gateway.homeUrl).apply {
-                    setRequestCache(requestCache)
+                // Nova vrednost K_GATEWAY_STATE: ostali tabovi i aplikacije vide da je neko prijavljen.
+                authenticationSuccessHandler = ServerAuthenticationSuccessHandler { webFilterExchange, _ ->
+                    val exchange = webFilterExchange.exchange
+                    marker.start(exchange).then(redirects.sendRedirect(exchange, URI.create(loginRequests.returnTo(exchange) ?: gateway.homeUrl)))
                 }
                 authenticationFailureHandler = loginFailureHandler()
             }
@@ -114,18 +129,16 @@ class SecurityConfig(
                 }
             }
             logout {
-                // Link "Odjava" u aplikaciji (GET) ili forma (POST).
-                requiresLogout = OrServerWebExchangeMatcher(
-                    PathPatternParserServerWebExchangeMatcher(LOGOUT_PATH, HttpMethod.GET),
-                    PathPatternParserServerWebExchangeMatcher(LOGOUT_PATH, HttpMethod.POST),
-                )
-                logoutSuccessHandler = GatewayLogoutSuccessHandler(properties, gateway)
+                // Samo forma (POST) sa iste adrese (SameOriginFilter); GET /logout je strana sa potvrdom (BffController),
+                // da odjavu ne pokrene tuđ link, slika ili druga aplikacija.
+                requiresLogout = PathPatternParserServerWebExchangeMatcher(LOGOUT_PATH, HttpMethod.POST)
+                logoutSuccessHandler = GatewayLogoutSuccessHandler(properties, gateway, appUrls, marker)
             }
             csrf {
                 disable()
             }
             exceptionHandling {
-                authenticationEntryPoint = entryPoint(requestCache)
+                authenticationEntryPoint = entryPoint(appUrls, marker)
             }
         }
     }
@@ -202,34 +215,51 @@ class SecurityConfig(
     private fun jwkSetUri() = "${properties.issuer}$JWKS_PATH"
 
     /**
-     * Navigacija browsera ide na prijavu na hostu gateway-a (posle nje nazad na istu adresu aplikacije);
-     * fetch/XHR i pozivi sa Bearer tokenom dobijaju 401.
+     * Navigacija browsera ide na prijavu na hostu gateway-a, sa `returnTo` (posle nje nazad na istu adresu aplikacije);
+     * pozivi sa Bearer tokenom dobijaju 401 po RFC 6750, a fetch/XHR 401 sa razlogom `no_session` u telu
+     * (i brisanje K_GATEWAY_STATE, ako je ostao posle isteka sesije).
      */
-    private fun entryPoint(requestCache: AbsoluteUrlRequestCache): ServerAuthenticationEntryPoint {
+    private fun entryPoint(appUrls: AppUrls, marker: SessionMarker): ServerAuthenticationEntryPoint {
         val pageNavigation = AndServerWebExchangeMatcher(
             MediaTypeServerWebExchangeMatcher(MediaType.TEXT_HTML).apply { setIgnoredMediaTypes(setOf(MediaType.ALL)) },
             NegatedServerWebExchangeMatcher(xhrRequest),
             NegatedServerWebExchangeMatcher(bearerRequest),
         )
-        val login = URI.create(gateway.publicUrl + AUTHORIZATION_PATH.replace("{registrationId}", REGISTRATION_ID))
+        val login = gateway.publicUrl + AUTHORIZATION_PATH.replace("{registrationId}", REGISTRATION_ID)
+        val redirects = DefaultServerRedirectStrategy()
+        val toLogin = ServerAuthenticationEntryPoint { exchange, _ ->
+            val url = exchange.request.uri.toString()
+            val returnTo = url.takeIf { exchange.request.method == HttpMethod.GET && appUrls.isAppUrl(it) }
+            // Kao promenljiva šablona, da se kodira cela (i `?`, `&` iz adrese strane).
+            val location = if (returnTo == null) {
+                URI.create(login)
+            } else {
+                UriComponentsBuilder.fromUriString(login).queryParam(LoginRequests.RETURN_TO, "{returnTo}").encode().buildAndExpand(returnTo).toUri()
+            }
+            redirects.sendRedirect(exchange, location)
+        }
 
         return DelegatingServerAuthenticationEntryPoint(
-            DelegateEntry(
-                pageNavigation,
-                RedirectServerAuthenticationEntryPoint(login.toString()).apply { setRequestCache(requestCache) },
-            ),
+            DelegateEntry(pageNavigation, toLogin),
+            DelegateEntry(bearerRequest, BearerTokenServerAuthenticationEntryPoint()),
         ).apply {
-            setDefaultEntryPoint(BearerTokenServerAuthenticationEntryPoint())
+            setDefaultEntryPoint { exchange, _ ->
+                marker.clear(exchange)
+                reject(exchange, HttpStatus.UNAUTHORIZED, "unauthorized", RejectReason.NO_SESSION)
+            }
         }
     }
 
     // Podrazumevano bi preusmerilo na /login?error, a to je na domenu aplikacije njena stranica.
-    private fun loginFailureHandler() = ServerAuthenticationFailureHandler { webFilterExchange, _ ->
+    private fun loginFailureHandler() = ServerAuthenticationFailureHandler { webFilterExchange, exception ->
+        log.warn("Prijava preko k-auth-a nije uspela: {}", exception.message)
         webFilterExchange.exchange.response.statusCode = HttpStatus.UNAUTHORIZED
         webFilterExchange.exchange.response.setComplete()
     }
 
     companion object {
+        private val log = LoggerFactory.getLogger(SecurityConfig::class.java)
+
         const val REGISTRATION_ID = "k-auth"
         const val ACCESS_TOKEN_TYPE = "at+jwt"
         const val AUTHORIZATION_PATH = "/bff/oauth2/authorization/{registrationId}"

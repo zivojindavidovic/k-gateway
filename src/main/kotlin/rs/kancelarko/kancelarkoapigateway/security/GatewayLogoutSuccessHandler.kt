@@ -13,10 +13,13 @@ import reactor.core.publisher.Mono
  *
  * k-auth zna samo za jednu adresu za povratak (`/bff/logged-out` na gateway-u); aplikacija sa koje
  * je korisnik kliknuo "Odjava" putuje kroz `state`, koji k-auth vraća nepromenjen.
+ * `K_GATEWAY_STATE` se briše odmah, da ostali tabovi i aplikacije vide odjavu.
  */
 class GatewayLogoutSuccessHandler(
     private val auth: KAuthProperties,
     private val gateway: GatewayProperties,
+    private val appUrls: AppUrls,
+    private val marker: SessionMarker,
 ) : ServerLogoutSuccessHandler {
 
     private val redirectStrategy = DefaultServerRedirectStrategy()
@@ -30,10 +33,12 @@ class GatewayLogoutSuccessHandler(
             .queryParam("client_id", auth.client.id)
             .queryParam("post_logout_redirect_uri", "${gateway.publicUrl}$LOGGED_OUT_PATH")
             .apply { if (idToken != null) queryParam("id_token_hint", idToken) }
-            .apply { if (gateway.isAppUrl(appUrl)) queryParam("state", appUrl) }
+            .apply { if (appUrls.isAppUrl(appUrl)) queryParam("state", appUrl) }
             .encode()
             .build()
             .toUri()
+
+        marker.clear(exchange.exchange)
 
         return redirectStrategy.sendRedirect(exchange.exchange, location)
     }
