@@ -28,7 +28,11 @@ data class KAuthProperties(
         val redisDatabase: Int = 2,
         val keyPrefix: String = "k-auth:",
         val timeout: Duration = Duration.ofMillis(300),
-        // S3: kad Redis ne radi, zahtev prolazi (token je i dalje potpisan i kratko traje).
+        // S3: kad Redis ne radi, zahtev prolazi (token je i dalje potpisan i kratko traje). Prihvaćen rizik:
+        // dok Redis ne radi, odjava ne deluje odmah. Sa `false` zahtev dobija 503, a sesija ostaje.
         val failOpen: Boolean = true,
+        // Poseban Redis korisnik (ACL) samo za čitanje `revoked-*`; prazno = isti kao za sesije gateway-a.
+        val username: String? = null,
+        val password: String? = null,
     )
 }

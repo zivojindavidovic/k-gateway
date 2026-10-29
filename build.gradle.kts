@@ -3,6 +3,7 @@ plugins {
     kotlin("plugin.spring") version "2.3.21"
     id("org.springframework.boot") version "4.1.1"
     id("io.spring.dependency-management") version "1.1.7"
+    id("com.github.node-gradle.node") version "7.1.0"
 }
 
 group = "rs.kancelarko"
@@ -53,4 +54,36 @@ kotlin {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+}
+
+// Browser klijent (src/main/frontend, TypeScript) → build/generated/frontend/bff/sdk.js → u jar, gateway ga
+// servira na /bff/sdk.js. Node se preuzima u Gradle keš; na mašini ne mora da postoji.
+node {
+    download = true
+    version = "24.11.0"
+    npmInstallCommand = "ci"
+    nodeProjectDir = file("src/main/frontend")
+}
+
+val frontendBuild by tasks.registering(com.github.gradle.node.npm.task.NpmTask::class) {
+    dependsOn(tasks.npmInstall)
+    args = listOf("run", "build")
+    inputs.dir("src/main/frontend/src")
+    inputs.files("src/main/frontend/package.json", "src/main/frontend/package-lock.json", "src/main/frontend/tsconfig.json")
+    outputs.dir(layout.buildDirectory.dir("generated/frontend"))
+}
+
+val frontendTest by tasks.registering(com.github.gradle.node.npm.task.NpmTask::class) {
+    dependsOn(tasks.npmInstall)
+    args = listOf("test")
+    inputs.dir("src/main/frontend/src")
+    inputs.dir("src/main/frontend/test")
+}
+
+tasks.processResources {
+    from(frontendBuild)
+}
+
+tasks.check {
+    dependsOn(frontendTest)
 }

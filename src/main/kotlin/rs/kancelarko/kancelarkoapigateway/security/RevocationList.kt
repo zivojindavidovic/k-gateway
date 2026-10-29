@@ -14,7 +14,7 @@ import reactor.core.publisher.Mono
  * Lista opozvanih sesija i tokena koju vodi k-auth (Redis baza auth-a, podrazumevano DB 2).
  *
  * Konekcija je namerno van Spring konteksta: kao bean bi isključila Boot-ovu podrazumevanu
- * konekciju koju koriste sesije gateway-a.
+ * konekciju koju koriste sesije gateway-a. Može imati svog Redis korisnika (ACL samo za čitanje).
  */
 @Component
 class RevocationList(
@@ -29,8 +29,8 @@ class RevocationList(
     private val connectionFactory = LettuceConnectionFactory(
         RedisStandaloneConfiguration(redisProperties.host, redisProperties.port).apply {
             database = revocation.redisDatabase
-            username = redisProperties.username
-            password = RedisPassword.of(redisProperties.password)
+            username = revocation.username?.takeIf { it.isNotBlank() } ?: redisProperties.username
+            password = RedisPassword.of(revocation.password?.takeIf { it.isNotBlank() } ?: redisProperties.password)
         },
     ).apply {
         afterPropertiesSet()
@@ -39,6 +39,10 @@ class RevocationList(
 
     private val redis = ReactiveStringRedisTemplate(connectionFactory)
 
+    /**
+     * Kad Redis ne odgovori: `false` (fail-open) ili greška [RevocationUnavailableException],
+     * koju pozivalac pretvara u 503 bez gašenja sesije.
+     */
     fun isRevoked(sid: String?, jti: String?): Mono<Boolean> {
         val keys = listOfNotNull(
             sid?.let { "${revocation.keyPrefix}revoked-sid:$it" },
@@ -53,7 +57,7 @@ class RevocationList(
             .timeout(revocation.timeout)
             .onErrorResume { ex ->
                 log.warn("Provera opoziva nije uspela (Redis), failOpen={}: {}", revocation.failOpen, ex.toString())
-                Mono.just(!revocation.failOpen)
+                if (revocation.failOpen) Mono.just(false) else Mono.error(RevocationUnavailableException(ex))
             }
     }
 
@@ -61,3 +65,5 @@ class RevocationList(
         connectionFactory.destroy()
     }
 }
+
+class RevocationUnavailableException(cause: Throwable) : RuntimeException("Lista opozvanih sesija nije dostupna", cause)

@@ -1,0 +1,16 @@
+{
+  "name": "@kancelarko/gateway-client-browser",
+  "private": true,
+  "description": "Browser klijent k-gateway-a: prati sesiju, prijavu i odjavu u svim aplikacijama. Gateway ga servira na /bff/sdk.js.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && esbuild src/index.ts --bundle --minify --format=iife --target=es2020 --legal-comments=none --outfile=../../../build/generated/frontend/bff/sdk.js",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
+}

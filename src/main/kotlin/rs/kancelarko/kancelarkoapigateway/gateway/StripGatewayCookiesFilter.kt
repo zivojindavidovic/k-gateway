@@ -9,22 +9,25 @@ import org.springframework.http.HttpHeaders
 import org.springframework.stereotype.Component
 import org.springframework.web.server.ServerWebExchange
 import reactor.core.publisher.Mono
+import rs.kancelarko.kancelarkoapigateway.security.SessionMarker
 
 /**
- * Cookie sesije gateway-a ne ide aplikacijama (nosi pristup tokenima); ostali cookie-ji
- * (npr. Laravel sesija aplikacije) prolaze.
+ * Cookie-ji gateway-a ne idu aplikacijama: sesija (nosi pristup tokenima) i `K_GATEWAY_STATE`
+ * (samo za browser klijent). Ostali cookie-ji (npr. Laravel sesija aplikacije) prolaze.
  */
 @Component
 class StripGatewayCookiesFilter(
     @Value("\${server.reactive.session.cookie.name:SESSION}") private val sessionCookieName: String,
 ) : GlobalFilter, Ordered {
 
+    private val gatewayCookies = setOf(sessionCookieName, SessionMarker.NAME)
+
     override fun filter(exchange: ServerWebExchange, chain: GatewayFilterChain): Mono<Void> {
         val cookies = exchange.request.headers[HttpHeaders.COOKIE] ?: return chain.filter(exchange)
         val kept = cookies
             .flatMap { it.split(';') }
             .map { it.trim() }
-            .filter { it.isNotEmpty() && it.substringBefore('=') != sessionCookieName }
+            .filter { it.isNotEmpty() && it.substringBefore('=') !in gatewayCookies }
 
         return chain.filter(
             exchange.mutate()
