@@ -38,6 +38,3 @@ out/
 
 ### Kotlin ###
 .kotlin
-
-### Frontend (browser klijent) ###
-src/main/frontend/node_modules/

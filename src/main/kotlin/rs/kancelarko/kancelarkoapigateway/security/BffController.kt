@@ -33,7 +33,8 @@ import java.util.HexFormat
  * - `/bff/logged-out?state=` — povratak sa odjave u k-auth-u na aplikaciju iz `state`;
  * - `/bff/session` — da li je korisnik prijavljen, za browser klijent (vidi [session]);
  * - `/bff/popup-done` — kraj prijave u popup prozoru: javlja strani koja ga je otvorila i zatvara se;
- * - `/bff/sdk.js` — browser klijent (`src/main/frontend`), isti za sve aplikacije;
+ * - `/bff/sdk.js` — browser klijent, isti za sve aplikacije; gotov build iz k-gateway-client (`dist/sdk.js`),
+ *   kopiran u `src/main/resources/bff/sdk.js`;
  * - `GET /logout` — potvrda odjave (odjava je samo POST, da je tuđ link ili slika ne pokrenu);
  * - `/account` — "Moj nalog" u k-auth-u, da aplikacija ne zna njegovu adresu.
  */
